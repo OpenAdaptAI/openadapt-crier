@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "crier"
+version = "0.1.0"
+description = "Event-driven social media approval bot with Telegram"
+readme = { text = "Event-driven social media approval bot with Telegram", content-type = "text/plain" }
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Richard Abrich", email = "richard@openadapt.ai" },
+]
+keywords = ["automation", "social-media", "telegram", "bot", "approval", "github"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "herald-announce",
+    "python-telegram-bot>=22",
+    "aiosqlite>=0.20",
+    "apscheduler>=3.10",
+    "httpx>=0.27",
+    "typer>=0.9",
+    "pydantic-settings>=2.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23",
+    "pytest-mock>=3.0",
+    "ruff>=0.1.0",
+]
+
+[tool.uv.sources]
+herald-announce = { path = "../herald", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["crier"]
+
+[project.scripts]
+crier = "crier.cli:app"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
