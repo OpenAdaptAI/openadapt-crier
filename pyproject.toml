@@ -43,7 +43,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-herald-announce = { path = "../herald", editable = true }
+herald-announce = { path = "../openadapt-herald", editable = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["crier"]
