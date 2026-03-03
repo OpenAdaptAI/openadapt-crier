@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "crier"
 version = "0.1.0"
 description = "Event-driven social media approval bot with Telegram"
-readme = { text = "Event-driven social media approval bot with Telegram", content-type = "text/plain" }
+readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
