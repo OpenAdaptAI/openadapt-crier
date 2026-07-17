@@ -1,5 +1,19 @@
 # openadapt-crier
 
+> [!IMPORTANT]
+> **Status: Internal tooling — not the product.** Crier is release-announcement
+> automation used by the OpenAdapt team. It is not part of the OpenAdapt product
+> and is not required by any OpenAdapt package.
+>
+> The OpenAdapt product is the demonstration compiler,
+> [`openadapt-flow`](https://github.com/OpenAdaptAI/openadapt-flow), installed
+> via the [`OpenAdapt`](https://github.com/OpenAdaptAI/OpenAdapt) launcher
+> (`pip install openadapt`): it compiles a demonstrated GUI workflow into a
+> deterministic, locally executable program. Healthy runs make no model calls,
+> and it halts instead of guessing when verification fails. Lifecycle labels for
+> every repository are in the
+> [repository lifecycle registry](https://github.com/OpenAdaptAI/.github/blob/main/REPOSITORY_LIFECYCLE.md).
+
 Event-driven social media approval bot with Telegram.
 
 ## How it works
