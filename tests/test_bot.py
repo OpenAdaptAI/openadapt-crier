@@ -85,6 +85,20 @@ class TestFormatDraftMessage:
         assert "release" in text
         assert "v1.0.0" in text
 
+    def test_format_blog_post_event(self, bot):
+        event_info = {
+            "repo": "OpenAdaptAI/openadapt-blog",
+            "event_type": "blog_post",
+            "ref": "the-500th-run",
+            "title": "The 500th run",
+            "url": "https://blog.openadapt.ai/posts/the-500th-run/",
+        }
+        drafts = {"twitter": "New post: The 500th run"}
+        text = bot._format_draft_message(event_info, drafts)
+        assert "blog_post" in text
+        assert "The 500th run" in text
+        assert "blog.openadapt.ai" in text
+
     def test_format_pr_event(self, bot):
         event_info = {
             "repo": "org/repo",

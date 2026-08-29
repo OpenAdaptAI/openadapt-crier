@@ -11,5 +11,5 @@ def _isolate_env(monkeypatch):
     import os
 
     for key in list(os.environ):
-        if key.startswith("CRIER_"):
+        if key.startswith("CRIER_") or key == "ANTHROPIC_API_KEY":
             monkeypatch.delenv(key, raising=False)

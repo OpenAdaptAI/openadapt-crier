@@ -178,6 +178,14 @@ class CrierBot:
             title = _escape_html(event_info.get("title", ""))
             author = _escape_html(event_info.get("author", ""))
             parts.append(f"  PR #{ref} by @{author}: {title}")
+        elif event_type == "blog_post":
+            title = _escape_html(event_info.get("title", ref))
+            url = _escape_html(
+                event_info.get("url") or event_info.get("html_url") or ""
+            )
+            parts.append(f"  Post: {title}")
+            if url:
+                parts.append(f"  URL: {url}")
 
         parts.append("")
 

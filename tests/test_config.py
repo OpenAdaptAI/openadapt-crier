@@ -18,9 +18,17 @@ class TestCrierSettings:
         assert settings.db_path == "./crier.db"
         assert settings.dry_run is False
 
-    def test_repo_list_empty(self):
+    def test_repo_list_empty_defaults_to_allowlist(self):
         settings = CrierSettings(_env_file=None, repos="")
-        assert settings.repo_list == []
+        assert settings.repo_list == [
+            "OpenAdaptAI/OpenAdapt",
+            "OpenAdaptAI/openadapt-flow",
+            "OpenAdaptAI/openadapt-blog",
+        ]
+
+    def test_use_claude_defaults_false(self):
+        settings = CrierSettings(_env_file=None)
+        assert settings.use_claude is False
 
     def test_repo_list_single(self):
         settings = CrierSettings(_env_file=None, repos="OpenAdaptAI/OpenAdapt")

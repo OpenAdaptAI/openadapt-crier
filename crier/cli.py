@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 
 import typer
@@ -13,7 +12,7 @@ from rich.table import Table
 
 app = typer.Typer(
     name="crier",
-    help="Event-driven social media approval bot with Telegram.",
+    help="Allowlisted release and blog drafts. Telegram optional.",
     no_args_is_help=True,
 )
 console = Console()
@@ -28,31 +27,45 @@ def _get_settings(**overrides):
 @app.command()
 def run(
     log_level: str = typer.Option("INFO", help="Logging level"),
+    use_claude: bool = typer.Option(
+        False,
+        "--use-claude",
+        help="Use Claude for draft text. Default is the free template.",
+    ),
 ) -> None:
-    """Start the bot and watcher loop (runs forever)."""
+    """Poll GitHub and write drafts to sqlite. Telegram is optional."""
     logging.basicConfig(
         level=getattr(logging, log_level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
     settings = _get_settings()
-
-    if not settings.has_telegram:
-        console.print(
-            "[red]Telegram not configured. Set CRIER_TELEGRAM_BOT_TOKEN "
-            "and CRIER_TELEGRAM_OWNER_ID.[/red]"
-        )
-        raise typer.Exit(1)
+    if use_claude:
+        settings.use_claude = True
 
     if not settings.repo_list:
         console.print("[red]No repos configured. Set CRIER_REPOS.[/red]")
         raise typer.Exit(1)
+
+    if not settings.has_telegram:
+        console.print(
+            "[yellow]Telegram not configured. Drafts will be written to sqlite "
+            f"({settings.db_path}). Set CRIER_TELEGRAM_BOT_TOKEN and "
+            "CRIER_TELEGRAM_OWNER_ID to review in Telegram.[/yellow]"
+        )
+
+    if settings.use_claude and not settings.has_anthropic:
+        console.print(
+            "[yellow]--use-claude set but no Anthropic key; using templates.[/yellow]"
+        )
 
     console.print(
         Panel(
             f"Repos: {', '.join(settings.repo_list)}\n"
             f"Poll interval: {settings.poll_interval}s\n"
             f"Interest threshold: {settings.interest_threshold}\n"
+            f"Claude drafts: {settings.use_claude}\n"
+            f"Telegram: {settings.has_telegram}\n"
             f"Dry run: {settings.dry_run}",
             title="[bold]Crier Starting[/bold]",
         )
@@ -62,100 +75,43 @@ def run(
 
 
 async def _run_bot_and_watcher(settings) -> None:
-    """Run the Telegram bot and GitHub watcher concurrently."""
+    """Poll GitHub; optionally run the Telegram bot."""
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-    from crier.bot import CrierBot
     from crier.db import init_db
-    from crier.drafter import generate_drafts, score_interestingness
+    from crier.pipeline import ingest_event
     from crier.watcher import GitHubWatcher
 
-    # Initialize database
     await init_db(settings.db_path)
 
-    # Set up the Telegram bot
-    bot = CrierBot(settings)
-    bot_app = bot.setup()
+    bot = None
+    bot_app = None
+    if settings.has_telegram:
+        from crier.bot import CrierBot
 
-    # Set up the GitHub watcher
-    watcher = GitHubWatcher(settings.github_token, settings.db_path)
+        bot = CrierBot(settings)
+        bot_app = bot.setup()
+
+    watcher = GitHubWatcher(
+        settings.github_token,
+        settings.db_path,
+        release_repos=settings.release_repo_list,
+        blog_repos=settings.blog_repo_list,
+    )
 
     async def poll_and_draft() -> None:
-        """Single poll cycle: check for events, score, draft, and send for approval."""
-        from crier.db import create_draft, create_event
-
+        """Single poll cycle: allowlisted events become sqlite drafts."""
         try:
             events = await watcher.poll_repos(settings.repo_list)
-            if not events:
-                return
-
             for event in events:
-                # Score interestingness for push events
-                if event.event_type == "push":
-                    commits = event.payload.get("commits", [])
-                    score = score_interestingness(
-                        commits, event.repo, settings.anthropic_api_key
-                    )
-                    if score < settings.interest_threshold:
-                        logging.getLogger("crier").info(
-                            "Skipping %s event on %s (score %.1f < threshold %.1f)",
-                            event.event_type,
-                            event.repo,
-                            score,
-                            settings.interest_threshold,
-                        )
-                        continue
-                else:
-                    # Releases and PR merges always pass
-                    score = 10.0
-
-                # Store the event
-                event_id = await create_event(
-                    settings.db_path,
-                    repo=event.repo,
-                    event_type=event.event_type,
-                    ref=event.ref,
-                    payload=json.dumps(event.payload),
-                )
-
-                # Generate drafts
-                drafts = generate_drafts(
-                    event, api_key=settings.anthropic_api_key
-                )
-
-                # Store drafts in DB
-                for platform, content in drafts.items():
-                    if platform == "summary":
-                        continue
-                    await create_draft(
-                        settings.db_path,
-                        event_id=event_id,
-                        platform=platform,
-                        content=content,
-                        interestingness_score=score,
-                    )
-
-                # Send to Telegram for approval
-                event_info = {
-                    "repo": event.repo,
-                    "event_type": event.event_type,
-                    "ref": event.ref,
-                    **event.payload,
-                }
-                await bot.send_draft_for_approval(
-                    chat_id=settings.telegram_owner_id,
-                    event_id=event_id,
-                    drafts={k: v for k, v in drafts.items() if k != "summary"},
-                    event_info=event_info,
-                )
-
+                await ingest_event(event, settings, bot=bot)
         except Exception:
             logging.getLogger("crier").exception("Error in poll cycle")
 
-    # Handle manual draft requests from /draft command
     async def check_manual_requests() -> None:
-        """Check for manual draft requests submitted via the /draft command."""
-        from crier.db import create_draft, create_event
+        """Handle /draft requests from Telegram, if the bot is running."""
+        if bot_app is None:
+            return
 
         manual_requests = bot_app.bot_data.get("manual_draft_requests", [])
         if not manual_requests:
@@ -165,110 +121,52 @@ async def _run_bot_and_watcher(settings) -> None:
 
         for repo in manual_requests:
             try:
-                events = await watcher.poll_repos([repo])
-                if not events:
-                    # Create a synthetic event for manual drafts
-                    event_id = await create_event(
-                        settings.db_path,
-                        repo=repo,
-                        event_type="push",
-                        ref="manual",
-                        payload=json.dumps({"commits": [], "manual": True}),
+                event = await watcher.fetch_latest_announcement(repo)
+                if event is None:
+                    logging.getLogger("crier").info(
+                        "No allowlisted announcement for manual draft of %s", repo
                     )
-
-                    from crier.watcher import GitHubEvent
-
-                    synthetic_event = GitHubEvent(
-                        repo=repo,
-                        event_type="push",
-                        ref="manual",
-                        payload={"commits": [], "manual": True},
-                    )
-                    drafts = generate_drafts(
-                        synthetic_event, api_key=settings.anthropic_api_key
-                    )
-                    for platform, content in drafts.items():
-                        if platform == "summary":
-                            continue
-                        await create_draft(
-                            settings.db_path,
-                            event_id=event_id,
-                            platform=platform,
-                            content=content,
-                        )
-                    event_info = {
-                        "repo": repo,
-                        "event_type": "push",
-                        "ref": "manual",
-                    }
-                    await bot.send_draft_for_approval(
-                        chat_id=settings.telegram_owner_id,
-                        event_id=event_id,
-                        drafts={k: v for k, v in drafts.items() if k != "summary"},
-                        event_info=event_info,
-                    )
-                else:
-                    for event in events:
-                        event_id = await create_event(
-                            settings.db_path,
-                            repo=event.repo,
-                            event_type=event.event_type,
-                            ref=event.ref,
-                            payload=json.dumps(event.payload),
-                        )
-                        drafts = generate_drafts(
-                            event, api_key=settings.anthropic_api_key
-                        )
-                        for platform, content in drafts.items():
-                            if platform == "summary":
-                                continue
-                            await create_draft(
-                                settings.db_path,
-                                event_id=event_id,
-                                platform=platform,
-                                content=content,
-                            )
-                        event_info = {
-                            "repo": event.repo,
-                            "event_type": event.event_type,
-                            "ref": event.ref,
-                            **event.payload,
-                        }
-                        await bot.send_draft_for_approval(
-                            chat_id=settings.telegram_owner_id,
-                            event_id=event_id,
-                            drafts={k: v for k, v in drafts.items() if k != "summary"},
-                            event_info=event_info,
-                        )
+                    continue
+                await ingest_event(event, settings, bot=bot)
             except Exception:
                 logging.getLogger("crier").exception(
                     "Error processing manual draft for %s", repo
                 )
 
-    # Set up the scheduler for polling
     scheduler = AsyncIOScheduler()
     scheduler.add_job(poll_and_draft, "interval", seconds=settings.poll_interval)
-    scheduler.add_job(check_manual_requests, "interval", seconds=5)
+    if bot_app is not None:
+        scheduler.add_job(check_manual_requests, "interval", seconds=5)
     scheduler.start()
 
-    # Run the bot (blocks until stopped)
-    async with bot_app:
-        await bot_app.start()
-        await bot_app.updater.start_polling()
-
-        console.print("[green]Crier is running. Press Ctrl+C to stop.[/green]")
-
-        try:
-            # Keep running until interrupted
-            while True:
-                await asyncio.sleep(1)
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            pass
-        finally:
+    try:
+        if bot_app is not None:
+            async with bot_app:
+                await bot_app.start()
+                await bot_app.updater.start_polling()
+                console.print("[green]Crier is running. Press Ctrl+C to stop.[/green]")
+                await _sleep_until_cancelled()
+                scheduler.shutdown()
+                await bot_app.updater.stop()
+                await bot_app.stop()
+                await bot_app.shutdown()
+        else:
+            console.print(
+                "[green]Crier is polling without Telegram. "
+                f"Drafts write to {settings.db_path}. Press Ctrl+C to stop.[/green]"
+            )
+            await _sleep_until_cancelled()
             scheduler.shutdown()
-            await bot_app.updater.stop()
-            await bot_app.stop()
-            await bot_app.shutdown()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        scheduler.shutdown()
+
+
+async def _sleep_until_cancelled() -> None:
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        return
 
 
 @app.command()
@@ -281,6 +179,7 @@ def status() -> None:
             f"Poll interval: {settings.poll_interval}s\n"
             f"Interest threshold: {settings.interest_threshold}\n"
             f"Telegram configured: {settings.has_telegram}\n"
+            f"Claude drafts: {settings.use_claude}\n"
             f"Anthropic configured: {settings.has_anthropic}\n"
             f"Discord configured: {settings.has_discord}\n"
             f"Twitter configured: {settings.has_twitter}\n"
@@ -356,51 +255,66 @@ async def _list_drafts(
 @app.command()
 def draft(
     repo: str = typer.Argument(..., help="Repository (owner/repo)"),
-    content_type: str = typer.Option("digest", help="Content type: digest, release, spotlight"),
+    content_type: str = typer.Option(
+        "digest", help="Content type: digest, release, spotlight (unused by templates)"
+    ),
     days: int = typer.Option(7, help="Look back this many days"),
+    use_claude: bool = typer.Option(
+        False,
+        "--use-claude",
+        help="Use Claude for draft text. Default is the free template.",
+    ),
 ) -> None:
-    """Manually generate a one-shot draft for a repo (no Telegram, no posting)."""
+    """Generate a one-shot draft for an allowlisted repo (no posting).
+
+    Writes the draft to sqlite. Telegram is not required. Anthropic is not
+    required unless --use-claude is set.
+    """
     settings = _get_settings()
+    if use_claude:
+        settings.use_claude = True
 
     console.print(f"[dim]Generating {content_type} draft for {repo}...[/dim]")
 
-    result = asyncio.run(_generate_one_shot_draft(settings, repo, content_type, days))
+    result = asyncio.run(_generate_one_shot_draft(settings, repo))
 
     if not result:
-        console.print("[yellow]No content generated.[/yellow]")
+        console.print(
+            "[yellow]No allowlisted announcement for this repo. "
+            "Crier drafts tagged releases of OpenAdaptAI/OpenAdapt and "
+            "OpenAdaptAI/openadapt-flow, and new posts on "
+            "OpenAdaptAI/openadapt-blog.[/yellow]"
+        )
         return
 
     for platform, text in result.items():
         console.print(Panel(str(text), title=f"[bold]{platform}[/bold]"))
 
 
-async def _generate_one_shot_draft(
-    settings, repo: str, content_type: str, days: int
-) -> dict[str, str]:
-    """Generate a draft without storing it or sending to Telegram."""
-    from crier.watcher import GitHubEvent, GitHubWatcher
-    from crier.drafter import generate_drafts
-
-    watcher = GitHubWatcher(settings.github_token, settings.db_path)
-
-    # We need a temporary db for the watcher
+async def _generate_one_shot_draft(settings, repo: str) -> dict[str, str]:
+    """Fetch the latest allowlisted event, draft it, and persist to sqlite."""
     from crier.db import init_db
+    from crier.drafter import generate_drafts
+    from crier.pipeline import ingest_event
+    from crier.watcher import GitHubWatcher
 
     await init_db(settings.db_path)
+    watcher = GitHubWatcher(
+        settings.github_token,
+        settings.db_path,
+        release_repos=settings.release_repo_list,
+        blog_repos=settings.blog_repo_list,
+    )
+    event = await watcher.fetch_latest_announcement(repo)
+    if event is None:
+        return {}
 
-    events = await watcher.poll_repos([repo])
-    if not events:
-        # Create a synthetic event
-        event = GitHubEvent(
-            repo=repo,
-            event_type="push",
-            ref="manual",
-            payload={"commits": [], "manual": True},
-        )
-    else:
-        event = events[0]
-
-    return generate_drafts(event, api_key=settings.anthropic_api_key)
+    await ingest_event(event, settings, bot=None)
+    return generate_drafts(
+        event,
+        api_key=settings.anthropic_api_key,
+        use_claude=settings.use_claude,
+    )
 
 
 @app.command()

@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+from crier.allowlist import PIP_INSTALL, PROGRAM_NOUN
 from crier.drafter import (
     _format_event_for_prompt,
     _parse_draft_response,
     _placeholder_drafts,
     generate_drafts,
     score_interestingness,
+    template_drafts,
 )
 from crier.watcher import GitHubEvent
 
@@ -85,13 +87,13 @@ class TestScoreInterestingness:
         score = score_interestingness(
             [{"sha": "a", "author": "b", "message": "c"}], "org/repo", "sk-test"
         )
-        assert score == 5.0  # default fallback
+        assert score == 0.0  # fail closed
 
     def test_score_no_api_key(self):
         score = score_interestingness(
             [{"sha": "a", "author": "b", "message": "c"}], "org/repo", ""
         )
-        assert score == 5.0
+        assert score == 0.0
 
     @patch("crier.drafter.anthropic.Anthropic")
     def test_score_handles_exception(self, mock_anthropic_cls):
@@ -100,7 +102,7 @@ class TestScoreInterestingness:
         score = score_interestingness(
             [{"sha": "a", "author": "b", "message": "c"}], "org/repo", "sk-test"
         )
-        assert score == 5.0
+        assert score == 0.0
 
 
 class TestGenerateDrafts:
@@ -130,7 +132,7 @@ class TestGenerateDrafts:
             },
         )
 
-        drafts = generate_drafts(event, api_key="sk-test")
+        drafts = generate_drafts(event, api_key="sk-test", use_claude=True)
         assert drafts["twitter"] == expected["twitter"]
         assert drafts["discord"] == expected["discord"]
 
@@ -157,7 +159,7 @@ class TestGenerateDrafts:
             payload={"commits": []},
         )
 
-        drafts = generate_drafts(event, api_key="sk-test")
+        drafts = generate_drafts(event, api_key="sk-test", use_claude=True)
         assert drafts["twitter"] == "Tweet"
 
     def test_generate_drafts_no_api_key(self):
@@ -174,6 +176,22 @@ class TestGenerateDrafts:
         assert "org/repo" in drafts["twitter"]
 
     @patch("crier.drafter.anthropic.Anthropic")
+    def test_generate_drafts_skips_claude_without_flag(self, mock_anthropic_cls):
+        event = GitHubEvent(
+            repo="OpenAdaptAI/openadapt-flow",
+            event_type="release",
+            ref="v1.0.0",
+            payload={
+                "tag": "v1.0.0",
+                "html_url": "https://github.com/OpenAdaptAI/openadapt-flow/releases/tag/v1.0.0",
+            },
+        )
+        drafts = generate_drafts(event, api_key="sk-test", use_claude=False)
+        mock_anthropic_cls.assert_not_called()
+        assert PROGRAM_NOUN in drafts["twitter"]
+        assert PIP_INSTALL in drafts["twitter"]
+
+    @patch("crier.drafter.anthropic.Anthropic")
     def test_generate_drafts_handles_api_error(self, mock_anthropic_cls):
         mock_anthropic_cls.side_effect = Exception("API down")
 
@@ -184,7 +202,7 @@ class TestGenerateDrafts:
             payload={"tag": "v1.0.0", "name": "v1.0.0"},
         )
 
-        drafts = generate_drafts(event, api_key="sk-test")
+        drafts = generate_drafts(event, api_key="sk-test", use_claude=True)
         assert "twitter" in drafts
         assert "v1.0.0" in drafts["twitter"]
 
@@ -223,6 +241,22 @@ class TestFormatEventForPrompt:
         assert "release" in text
         assert "v2.0.0" in text
         assert "Major update" in text
+
+    def test_format_blog_event(self):
+        event = GitHubEvent(
+            repo="OpenAdaptAI/openadapt-blog",
+            event_type="blog_post",
+            ref="the-500th-run",
+            payload={
+                "slug": "the-500th-run",
+                "title": "The 500th run",
+                "url": "https://blog.openadapt.ai/posts/the-500th-run/",
+            },
+        )
+        text = _format_event_for_prompt(event)
+        assert "blog_post" in text
+        assert "The 500th run" in text
+        assert "blog.openadapt.ai" in text
 
     def test_format_pr_event(self):
         event = GitHubEvent(
@@ -326,3 +360,49 @@ class TestPlaceholderDrafts:
         )
         drafts = _placeholder_drafts(event)
         assert "feat: auth" in drafts["twitter"]
+
+
+class TestTemplateDrafts:
+    def test_flow_release_includes_noun_pip_and_url(self):
+        url = "https://github.com/OpenAdaptAI/openadapt-flow/releases/tag/v1.20.0"
+        event = GitHubEvent(
+            repo="OpenAdaptAI/openadapt-flow",
+            event_type="release",
+            ref="v1.20.0",
+            payload={"tag": "v1.20.0", "html_url": url},
+        )
+        drafts = template_drafts(event)
+        for key in ("twitter", "discord", "linkedin"):
+            assert PROGRAM_NOUN in drafts[key]
+            assert PIP_INSTALL in drafts[key]
+            assert url in drafts[key]
+        assert "—" not in drafts["twitter"]
+        assert "excited" not in drafts["twitter"].lower()
+
+    def test_blog_post_includes_noun_pip_and_url(self):
+        url = "https://blog.openadapt.ai/posts/the-500th-run/"
+        event = GitHubEvent(
+            repo="OpenAdaptAI/openadapt-blog",
+            event_type="blog_post",
+            ref="the-500th-run",
+            payload={"slug": "the-500th-run", "title": "The 500th run", "url": url},
+        )
+        drafts = template_drafts(event)
+        assert "The 500th run" in drafts["twitter"]
+        assert PROGRAM_NOUN in drafts["discord"]
+        assert PIP_INSTALL in drafts["discord"]
+        assert url in drafts["discord"]
+
+    def test_twitter_stays_within_limit(self):
+        event = GitHubEvent(
+            repo="OpenAdaptAI/OpenAdapt",
+            event_type="release",
+            ref="v9.9.9",
+            payload={
+                "tag": "v9.9.9",
+                "name": "x" * 200,
+                "html_url": "https://github.com/OpenAdaptAI/OpenAdapt/releases/tag/v9.9.9",
+            },
+        )
+        drafts = template_drafts(event)
+        assert len(drafts["twitter"]) <= 280

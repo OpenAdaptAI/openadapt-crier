@@ -209,7 +209,11 @@ class TestGitHubWatcher:
 
     @pytest.mark.asyncio
     async def test_check_releases_new(self, db_path):
-        """Detects new releases."""
+        """Detects new releases after the cursor is seeded."""
+        from crier.db import update_last_seen_sha
+
+        await update_last_seen_sha(db_path, "org/repo:release", "v0.9.0")
+
         watcher = GitHubWatcher(github_token="ghp_test", db_path=db_path)
         mock_response = _mock_response(
             200,
@@ -221,6 +225,7 @@ class TestGitHubWatcher:
                     "published_at": "2026-03-01T12:00:00Z",
                     "html_url": "https://github.com/org/repo/releases/v1.0.0",
                     "draft": False,
+                    "prerelease": False,
                 },
             ],
         )
@@ -232,6 +237,59 @@ class TestGitHubWatcher:
         assert len(events) == 1
         assert events[0].event_type == "release"
         assert events[0].ref == "v1.0.0"
+
+    @pytest.mark.asyncio
+    async def test_check_releases_first_poll_seeds(self, db_path):
+        """First poll records the latest tag and emits nothing."""
+        from crier.db import get_last_seen_sha
+
+        watcher = GitHubWatcher(github_token="ghp_test", db_path=db_path)
+        mock_response = _mock_response(
+            200,
+            [
+                {
+                    "tag_name": "v1.0.0",
+                    "name": "Release 1.0.0",
+                    "body": "",
+                    "published_at": "",
+                    "html_url": "",
+                    "draft": False,
+                    "prerelease": False,
+                },
+            ],
+        )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        events = await watcher._check_releases(mock_client, "org/repo")
+        assert events == []
+        assert await get_last_seen_sha(db_path, "org/repo:release") == "v1.0.0"
+
+    @pytest.mark.asyncio
+    async def test_check_releases_skips_prereleases(self, db_path):
+        from crier.db import update_last_seen_sha
+
+        await update_last_seen_sha(db_path, "org/repo:release", "v0.9.0")
+        watcher = GitHubWatcher(github_token="ghp_test", db_path=db_path)
+        mock_response = _mock_response(
+            200,
+            [
+                {
+                    "tag_name": "v2.0.0-rc.1",
+                    "name": "RC",
+                    "body": "",
+                    "published_at": "",
+                    "html_url": "",
+                    "draft": False,
+                    "prerelease": True,
+                },
+            ],
+        )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        events = await watcher._check_releases(mock_client, "org/repo")
+        assert events == []
 
     @pytest.mark.asyncio
     async def test_check_releases_skips_drafts(self, db_path):
@@ -306,6 +364,149 @@ class TestGitHubWatcher:
 
         events = await watcher._check_merged_prs(mock_client, "org/repo")
         assert events == []
+
+    @pytest.mark.asyncio
+    async def test_poll_skips_research_repo(self, db_path):
+        watcher = GitHubWatcher(github_token="ghp_test", db_path=db_path)
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        events = await watcher._poll_single_repo(mock_client, "OpenAdaptAI/openadapt-evals")
+        assert events == []
+        mock_client.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_poll_allowlisted_release_repo_skips_commits(self, db_path):
+        watcher = GitHubWatcher(github_token="ghp_test", db_path=db_path)
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        with (
+            patch.object(watcher, "_check_commits", new_callable=AsyncMock) as commits,
+            patch.object(
+                watcher, "_check_releases", new_callable=AsyncMock, return_value=[]
+            ) as releases,
+            patch.object(watcher, "_check_merged_prs", new_callable=AsyncMock) as prs,
+            patch.object(watcher, "_check_blog_posts", new_callable=AsyncMock) as posts,
+        ):
+            await watcher._poll_single_repo(mock_client, "OpenAdaptAI/OpenAdapt")
+            commits.assert_not_called()
+            prs.assert_not_called()
+            posts.assert_not_called()
+            releases.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_check_blog_posts_first_poll_seeds(self, db_path):
+        from crier.db import get_last_seen_sha
+
+        watcher = GitHubWatcher(github_token="ghp_test", db_path=db_path)
+        mock_response = _mock_response(
+            200,
+            [
+                {"name": "the-500th-run", "type": "dir"},
+                {"name": "silent-wrong-action", "type": "dir"},
+            ],
+        )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        events = await watcher._check_blog_posts(
+            mock_client, "OpenAdaptAI/openadapt-blog"
+        )
+        assert events == []
+        stored = await get_last_seen_sha(db_path, "OpenAdaptAI/openadapt-blog:blog")
+        assert "the-500th-run" in stored
+
+    @pytest.mark.asyncio
+    async def test_check_blog_posts_empty_dir_then_new_post(self, db_path):
+        """An empty first poll still seeds, so the first real post is drafted."""
+        import json
+
+        from crier.db import get_last_seen_sha
+
+        watcher = GitHubWatcher(github_token="ghp_test", db_path=db_path)
+        empty = _mock_response(200, [])
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get = AsyncMock(return_value=empty)
+        assert (
+            await watcher._check_blog_posts(mock_client, "OpenAdaptAI/openadapt-blog")
+            == []
+        )
+
+        listing = _mock_response(200, [{"name": "new-post", "type": "dir"}])
+        index_md = _mock_response(
+            200,
+            {
+                "encoding": "base64",
+                "content": __import__("base64")
+                .b64encode(b"---\ntitle: New post\n---\n")
+                .decode(),
+            },
+        )
+
+        async def _get(url, params=None):
+            if url.endswith("/contents/content/posts"):
+                return listing
+            return index_md
+
+        mock_client.get = AsyncMock(side_effect=_get)
+        events = await watcher._check_blog_posts(
+            mock_client, "OpenAdaptAI/openadapt-blog"
+        )
+        assert len(events) == 1
+        assert events[0].ref == "new-post"
+        stored = json.loads(
+            await get_last_seen_sha(db_path, "OpenAdaptAI/openadapt-blog:blog")
+        )
+        assert "new-post" in stored
+
+    @pytest.mark.asyncio
+    async def test_check_blog_posts_emits_new_slug(self, db_path):
+        import json
+
+        from crier.db import update_last_seen_sha
+
+        await update_last_seen_sha(
+            db_path,
+            "OpenAdaptAI/openadapt-blog:blog",
+            json.dumps(["silent-wrong-action"]),
+        )
+        watcher = GitHubWatcher(github_token="ghp_test", db_path=db_path)
+
+        listing = _mock_response(
+            200,
+            [
+                {"name": "the-500th-run", "type": "dir"},
+                {"name": "silent-wrong-action", "type": "dir"},
+            ],
+        )
+        index_md = _mock_response(
+            200,
+            {
+                "encoding": "base64",
+                "content": __import__("base64")
+                .b64encode(
+                    b'---\ntitle: "The 500th run"\n---\nBody\n'
+                )
+                .decode()
+            },
+        )
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+
+        async def _get(url, params=None):
+            if url.endswith("/contents/content/posts"):
+                return listing
+            return index_md
+
+        mock_client.get = AsyncMock(side_effect=_get)
+
+        events = await watcher._check_blog_posts(
+            mock_client, "OpenAdaptAI/openadapt-blog"
+        )
+        assert len(events) == 1
+        assert events[0].event_type == "blog_post"
+        assert events[0].ref == "the-500th-run"
+        assert events[0].payload["title"] == "The 500th run"
+        assert events[0].payload["url"] == (
+            "https://blog.openadapt.ai/posts/the-500th-run/"
+        )
 
 
 class TestEventsToJson:
