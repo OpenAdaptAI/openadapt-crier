@@ -82,14 +82,9 @@ async def post_approved_draft(
     results: dict[str, dict[str, str]] = {}
 
     if settings.dry_run:
+        # Nothing is published, so leave each draft's status as it is. Writing
+        # "posted" would put dry-run drafts in the posting history.
         for platform, text in content.items():
-            draft_id = draft_id_by_platform[platform]
-            await update_draft_status(
-                settings.db_path,
-                draft_id,
-                status="posted",
-                post_url="[DRY RUN]",
-            )
             results[platform] = {
                 "success": "true",
                 "message": f"[DRY RUN] Would post: {text[:100]}...",
@@ -150,6 +145,15 @@ async def post_single_draft(
         return {"success": "false", "message": f"Draft {draft_id} not found", "url": ""}
 
     platform = draft["platform"]
+
+    if settings.dry_run:
+        # Nothing is published, so leave the draft's status as it is.
+        return {
+            "success": "true",
+            "message": f"[DRY RUN] Would post to {platform}",
+            "url": "",
+        }
+
     herald_settings = _build_herald_settings(settings)
     publishers = get_publishers(herald_settings)
     publishers = [p for p in publishers if p.platform_name == platform]
@@ -162,16 +166,6 @@ async def post_single_draft(
         return {"success": "false", "message": error_msg, "url": ""}
 
     content = {platform: draft["content"]}
-
-    if settings.dry_run:
-        await update_draft_status(
-            settings.db_path, draft_id, status="posted", post_url="[DRY RUN]"
-        )
-        return {
-            "success": "true",
-            "message": f"[DRY RUN] Would post to {platform}",
-            "url": "",
-        }
 
     report = publish_content(content, publishers, dry_run=False)
 

@@ -18,7 +18,7 @@ Event-driven social media approval bot with Telegram.
 
 ## How it works
 
-Crier watches GitHub repositories for new commits, releases, and merged PRs. When activity is detected, it uses an LLM (Claude) to score how interesting the event is. Events that pass the interest threshold get platform-specific draft posts generated automatically. Drafts are sent to a Telegram bot for human review, where you can approve, edit, or reject them. On approval, posts are dispatched to Discord, Twitter/X, and LinkedIn via [openadapt-herald](https://github.com/OpenAdaptAI/openadapt-herald).
+Crier watches GitHub repositories for new commits, releases, and merged PRs. When activity is detected, it uses an LLM (Claude) to score how interesting the event is. Events that pass the interest threshold get platform-specific draft posts generated automatically. If Crier can't score new commits (no API key, an API error, or a reply without a number), it skips them and logs a warning instead of drafting posts. Drafts are sent to a Telegram bot for human review, where you can approve, edit, or reject them. On approval, posts are dispatched to Discord, Twitter/X, and LinkedIn via [openadapt-herald](https://github.com/OpenAdaptAI/openadapt-herald).
 
 ```
 GitHub Events ──> Watcher ──> Drafter (LLM) ──> Telegram Bot ──> Dispatcher ──> Herald ──> Social Platforms
@@ -74,7 +74,7 @@ All settings can be set via `CRIER_`-prefixed environment variables or a `.env` 
 | `CRIER_ANTHROPIC_API_KEY` | Anthropic API key | `$ANTHROPIC_API_KEY` |
 | `CRIER_POLL_INTERVAL` | Seconds between polls | `60` |
 | `CRIER_INTEREST_THRESHOLD` | Minimum score (0-10) to generate drafts | `5.0` |
-| `CRIER_DRY_RUN` | Skip actual posting | `false` |
+| `CRIER_DRY_RUN` | Don't publish approved drafts or mark them as posted | `false` |
 
 ## Telegram bot commands
 
@@ -89,7 +89,7 @@ Draft messages include inline buttons to **Approve**, **Edit**, or **Reject**, p
 
 ## Tests
 
-132 tests covering all modules:
+141 tests covering all modules:
 
 ```bash
 pip install ".[dev]"

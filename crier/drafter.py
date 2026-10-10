@@ -18,15 +18,19 @@ def score_interestingness(
     repo: str,
     api_key: str,
     model: str = "claude-sonnet-4-20250514",
-) -> float:
+) -> float | None:
     """Score how interesting a set of commits are for social media (0-10).
 
     Uses a quick Claude API call to evaluate whether the commits
     are worth announcing publicly.
+
+    Returns None when no score could be produced (no API key, an API error,
+    or a reply without a number). Callers must treat None as failing the
+    interest gate, never as a passing score.
     """
     if not api_key:
-        logger.warning("No Anthropic API key configured; defaulting score to 5.0")
-        return 5.0
+        logger.warning("No Anthropic API key configured; cannot score commits")
+        return None
 
     commit_summary = "\n".join(
         f"- {c.get('sha', '')[:8]} by {c.get('author', 'unknown')}: {c.get('message', '')}"
@@ -56,10 +60,10 @@ def score_interestingness(
             score = float(match.group())
             return min(max(score, 0.0), 10.0)
         logger.warning("Could not parse score from LLM response: %s", text)
-        return 5.0
+        return None
     except Exception:
         logger.exception("Error scoring interestingness")
-        return 5.0
+        return None
 
 
 def generate_drafts(

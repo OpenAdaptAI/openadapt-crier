@@ -194,6 +194,49 @@ class TestCallbackApprove:
         query.answer.assert_called_with("Unauthorized.")
 
 
+    @pytest.mark.asyncio
+    async def test_callback_approve_dry_run_does_not_say_posted(self, bot):
+        """In a dry run the Telegram message must not claim anything was posted."""
+        bot.setup()
+        event_id = "test-event"
+        bot._platform_toggles[event_id] = {"discord"}
+
+        query = MagicMock()
+        query.from_user = MagicMock()
+        query.from_user.id = 999  # authorized
+        query.data = f"approve:{event_id}"
+        query.message.text = "New push on org/repo"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+
+        update = MagicMock()
+        update.callback_query = query
+
+        dry_run_result = {
+            "discord": {
+                "success": "true",
+                "message": "[DRY RUN] Would post: Test...",
+                "url": "",
+            }
+        }
+        with (
+            patch(
+                "crier.bot.get_drafts_by_event",
+                new=AsyncMock(return_value=[{"id": "d1", "platform": "discord"}]),
+            ),
+            patch("crier.bot.create_feedback", new=AsyncMock()),
+            patch("crier.bot.update_draft_status", new=AsyncMock()),
+            patch(
+                "crier.bot.post_approved_draft", new=AsyncMock(return_value=dry_run_result)
+            ),
+        ):
+            await bot._callback_approve(update, MagicMock())
+
+        new_text = query.edit_message_text.await_args.kwargs["text"]
+        assert "posted" not in new_text.lower().replace("not posted", "")
+        assert "Discord: Not posted (dry run)" in new_text
+
+
 class TestCallbackReject:
     @pytest.mark.asyncio
     async def test_callback_reject_unauthorized(self, bot):
