@@ -89,7 +89,7 @@ Draft messages include inline buttons to **Approve**, **Edit**, or **Reject**, p
 
 ## Tests
 
-141 tests covering all modules:
+144 tests covering all modules:
 
 ```bash
 pip install ".[dev]"
