@@ -188,3 +188,56 @@ class TestScheduledPollJob:
         create_draft.assert_not_called()
         generate_drafts.assert_not_called()
         bot.send_draft_for_approval.assert_not_awaited()
+
+
+def _github_transport(commit_message: str):
+    """Serve one commit, no releases, and no PRs for any repo."""
+    import httpx
+
+    commits = [
+        {
+            "sha": "a" * 40,
+            "author": {"login": "alice"},
+            "commit": {
+                "message": commit_message,
+                "author": {"name": "Alice", "date": "2026-10-01T00:00:00Z"},
+            },
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/commits"):
+            return httpx.Response(200, json=commits)
+        return httpx.Response(200, json=[])
+
+    return httpx.MockTransport(handler)
+
+
+class TestOneShotDraft:
+    @pytest.mark.asyncio
+    async def test_draft_leaves_the_bot_database_alone(self, settings, monkeypatch):
+        """`crier draft` must not mark activity as seen in the bot's database.
+
+        If it did, a second run would find no new commits, and a running bot
+        that shares the database would never draft them.
+        """
+        import os
+
+        import httpx
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        settings.anthropic_api_key = ""  # placeholder drafts, no API call
+        transport = _github_transport("feat: add a thing")
+        real_client = httpx.AsyncClient
+        monkeypatch.setattr(
+            "crier.watcher.httpx.AsyncClient",
+            lambda **kwargs: real_client(transport=transport, **kwargs),
+        )
+
+        first = await cli._generate_one_shot_draft(settings, "org/repo", "digest", 7)
+        second = await cli._generate_one_shot_draft(settings, "org/repo", "digest", 7)
+
+        expected = "1 new commit(s) on org/repo: feat: add a thing"
+        assert first["summary"] == expected
+        assert second["summary"] == expected
+        assert not os.path.exists(settings.db_path)

@@ -393,18 +393,27 @@ def draft(
 async def _generate_one_shot_draft(
     settings, repo: str, content_type: str, days: int
 ) -> dict[str, str]:
-    """Generate a draft without storing it or sending to Telegram."""
-    from crier.watcher import GitHubEvent, GitHubWatcher
-    from crier.drafter import generate_drafts
+    """Generate a draft without storing it or sending to Telegram.
 
-    watcher = GitHubWatcher(settings.github_token, settings.db_path)
+    The watcher records the newest commit, release, and PR it has seen. Polling
+    against settings.db_path would mark that activity as seen, so a running bot
+    that shares the database would never draft it. A throwaway database keeps
+    this command from changing any state, and running it again gives the same
+    result.
+    """
+    import tempfile
+    from pathlib import Path
 
-    # We need a temporary db for the watcher
     from crier.db import init_db
+    from crier.drafter import generate_drafts
+    from crier.watcher import GitHubEvent, GitHubWatcher
 
-    await init_db(settings.db_path)
+    with tempfile.TemporaryDirectory(prefix="crier-draft-") as scratch_dir:
+        scratch_db = str(Path(scratch_dir) / "crier.db")
+        await init_db(scratch_db)
+        watcher = GitHubWatcher(settings.github_token, scratch_db)
+        events = await watcher.poll_repos([repo])
 
-    events = await watcher.poll_repos([repo])
     if not events:
         # Create a synthetic event
         event = GitHubEvent(
