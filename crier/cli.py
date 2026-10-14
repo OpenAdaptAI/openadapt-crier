@@ -13,7 +13,10 @@ from rich.table import Table
 
 app = typer.Typer(
     name="crier",
-    help="Event-driven social media approval bot with Telegram.",
+    help=(
+        "Draft posts about GitHub activity with Claude, approve them in Telegram, "
+        "then post to Discord, X, and LinkedIn."
+    ),
     no_args_is_help=True,
 )
 console = Console()
@@ -25,11 +28,37 @@ def _get_settings(**overrides):
     return get_settings(**overrides)
 
 
+def _has_database(db_path: str) -> bool:
+    """Return True if db_path holds the database that `crier run` creates.
+
+    The file is opened read-only, so checking never creates an empty file.
+    """
+    import sqlite3
+    from contextlib import closing
+    from pathlib import Path
+
+    path = Path(db_path)
+    if not path.is_file():
+        return False
+    try:
+        with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'drafts'"
+            ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def _print_no_database(db_path: str) -> None:
+    console.print(f"[yellow]No database at {db_path} yet. `crier run` creates it.[/yellow]")
+
+
 @app.command()
 def run(
     log_level: str = typer.Option("INFO", help="Logging level"),
 ) -> None:
-    """Start the bot and watcher loop (runs forever)."""
+    """Start the Telegram bot and poll GitHub until you stop it."""
     logging.basicConfig(
         level=getattr(logging, log_level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -289,7 +318,7 @@ async def _run_bot_and_watcher(settings) -> None:
 
 @app.command()
 def status() -> None:
-    """Show bot status and configuration summary."""
+    """Show the configuration and the number of pending drafts."""
     settings = _get_settings()
     console.print(
         Panel(
@@ -307,12 +336,11 @@ def status() -> None:
         )
     )
 
-    # Show pending drafts if DB exists
-    import os
-
-    if os.path.exists(settings.db_path):
+    if _has_database(settings.db_path):
         pending = asyncio.run(_get_pending_count(settings.db_path))
         console.print(f"\nPending drafts: {pending}")
+    else:
+        _print_no_database(settings.db_path)
 
 
 async def _get_pending_count(db_path: str) -> int:
@@ -330,6 +358,9 @@ def drafts(
 ) -> None:
     """List recent drafts, optionally filtered by status and platform."""
     settings = _get_settings()
+    if not _has_database(settings.db_path):
+        _print_no_database(settings.db_path)
+        return
     result = asyncio.run(
         _list_drafts(settings.db_path, draft_status, days, platform or None)
     )
@@ -372,19 +403,27 @@ async def _list_drafts(
 @app.command()
 def draft(
     repo: str = typer.Argument(..., help="Repository (owner/repo)"),
-    content_type: str = typer.Option("digest", help="Content type: digest, release, spotlight"),
-    days: int = typer.Option(7, help="Look back this many days"),
+    # Accepted so existing scripts keep working, but not used yet, so hidden from --help.
+    content_type: str = typer.Option("digest", hidden=True),
+    days: int = typer.Option(7, hidden=True),
 ) -> None:
-    """Manually generate a one-shot draft for a repo (no Telegram, no posting)."""
+    """Print drafts for a repository's latest activity.
+
+    Doesn't post, use Telegram, or change the database.
+    """
     settings = _get_settings()
 
-    console.print(f"[dim]Generating {content_type} draft for {repo}...[/dim]")
+    console.print(f"[dim]Checking recent activity on {repo}...[/dim]")
 
     result = asyncio.run(_generate_one_shot_draft(settings, repo, content_type, days))
 
     if not result:
-        console.print("[yellow]No content generated.[/yellow]")
-        return
+        console.print(
+            f"[yellow]Found no commits, releases, or merged pull requests to draft on "
+            f"{repo}. Check the name. For a private repository, or if GitHub's rate "
+            f"limit was reached, set CRIER_GITHUB_TOKEN.[/yellow]"
+        )
+        raise typer.Exit(1)
 
     for platform, text in result.items():
         console.print(Panel(str(text), title=f"[bold]{platform}[/bold]"))
@@ -393,20 +432,24 @@ def draft(
 async def _generate_one_shot_draft(
     settings, repo: str, content_type: str, days: int
 ) -> dict[str, str]:
-    """Generate a draft without storing it or sending to Telegram.
+    """Generate drafts without storing them or sending them to Telegram.
 
     The watcher records the newest commit, release, and PR it has seen. Polling
     against settings.db_path would mark that activity as seen, so a running bot
     that shares the database would never draft it. A throwaway database keeps
     this command from changing any state, and running it again gives the same
     result.
+
+    Returns an empty dict when GitHub reports no activity (an unknown or
+    private repository, a rate limit, or only filtered commits). Drafting an
+    empty event would print posts about nothing, or ask Claude to write one.
     """
     import tempfile
     from pathlib import Path
 
     from crier.db import init_db
     from crier.drafter import generate_drafts
-    from crier.watcher import GitHubEvent, GitHubWatcher
+    from crier.watcher import GitHubWatcher
 
     with tempfile.TemporaryDirectory(prefix="crier-draft-") as scratch_dir:
         scratch_db = str(Path(scratch_dir) / "crier.db")
@@ -415,17 +458,9 @@ async def _generate_one_shot_draft(
         events = await watcher.poll_repos([repo])
 
     if not events:
-        # Create a synthetic event
-        event = GitHubEvent(
-            repo=repo,
-            event_type="push",
-            ref="manual",
-            payload={"commits": [], "manual": True},
-        )
-    else:
-        event = events[0]
+        return {}
 
-    return generate_drafts(event, api_key=settings.anthropic_api_key)
+    return generate_drafts(events[0], api_key=settings.anthropic_api_key)
 
 
 @app.command()
@@ -433,8 +468,11 @@ def history(
     platform: str = typer.Option("", help="Filter by platform"),
     days: int = typer.Option(30, help="Look back this many days"),
 ) -> None:
-    """Show posting history."""
+    """List posted drafts and their URLs."""
     settings = _get_settings()
+    if not _has_database(settings.db_path):
+        _print_no_database(settings.db_path)
+        return
 
     result = asyncio.run(
         _list_drafts(settings.db_path, "posted", days, platform or None)

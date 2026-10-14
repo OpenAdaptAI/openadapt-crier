@@ -5,9 +5,9 @@ and accounts. For installation and usage, see the [README](../README.md).
 
 ## Repository status
 
-openadapt-crier is support tooling that the OpenAdapt team uses to announce its
-own releases. It isn't part of the OpenAdapt product, and no OpenAdapt package
-depends on it.
+openadapt-crier is support tooling that the OpenAdapt team built to announce
+its own releases. It isn't part of the OpenAdapt product, and no OpenAdapt
+package depends on it.
 
 The OpenAdapt product is
 [openadapt-flow](https://github.com/OpenAdaptAI/openadapt-flow), installed with
@@ -24,8 +24,8 @@ OpenAdapt repository.
 | Data | Sent to | When |
 | --- | --- | --- |
 | Repository names, and your GitHub token if one is set | GitHub API | On every poll, and on each `crier draft` |
-| The first line of each new commit message, commit SHAs and author logins, release tags and names with the first 1,000 characters of the release notes, and pull request numbers, titles, and authors with the first 500 characters of the description | Anthropic API | When Crier scores commits or writes drafts, and only if an Anthropic API key is set |
-| Drafts and a summary of the activity they describe | Telegram, to the chat of `CRIER_TELEGRAM_OWNER_ID` only | For each release, merged pull request, and commit batch that passes the score |
+| The repository name; the first line of each new commit message, the first 8 characters of its SHA, and its author's login or name; release tags and names with the first 1,000 characters of the release notes, and pull request numbers, titles, and authors with the first 500 characters of the description | Anthropic API | When Crier scores commits or writes drafts, and only if an Anthropic API key is set |
+| Drafts and a summary of the activity they describe | Telegram, to the chat of `CRIER_TELEGRAM_OWNER_ID` only | For each release, merged pull request, and commit batch that passes the score, and for each `/draft` request |
 | The text of approved drafts | Discord, X, and LinkedIn | Only after you press **Approve**, only to the platforms that are on, and never when `CRIER_DRY_RUN` is `true` |
 
 `crier draft` sends to GitHub and, if a key is set, to Anthropic. It sends

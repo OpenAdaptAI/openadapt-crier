@@ -7,14 +7,15 @@ Discord, X (Twitter), and LinkedIn. Nothing is posted until you approve it.
 
 Crier is for maintainers who want to announce their project's progress without
 writing every post by hand or letting a bot post on its own. The OpenAdapt team
-uses it for its own announcements. It isn't part of the
+built it for its own announcements. It isn't part of the
 [OpenAdapt](https://github.com/OpenAdaptAI/OpenAdapt) product, and no OpenAdapt
 package depends on it.
 
 ## Quick start
 
-You need Python 3.10 or later. To see drafts for any public repository, without
-Telegram and without posting anything:
+You need Python 3.10 or later. Crier isn't on PyPI, and the `crier` package
+there is a different project, so install it from GitHub. To see drafts for any
+public repository, without Telegram and without posting anything:
 
 ```bash
 pip install git+https://github.com/OpenAdaptAI/openadapt-crier
@@ -22,9 +23,10 @@ export ANTHROPIC_API_KEY=sk-ant-...
 crier draft OpenAdaptAI/OpenAdapt
 ```
 
-Crier prints a draft for each platform and a one-line summary. `crier draft`
-doesn't post, doesn't send anything to Telegram, and doesn't change Crier's
-database, so it's safe to run next to a running bot. Without
+Crier prints drafts about the repository's latest activity, usually its recent
+commits: one for each platform and a one-line summary. `crier draft` doesn't
+post, doesn't send anything to Telegram, and doesn't change Crier's database, so
+it's safe to run next to a running bot. Without
 `ANTHROPIC_API_KEY`, each draft is a one-line description of the activity, such
 as `8 new commit(s) on owner/repo: <latest commit message>`.
 
@@ -75,7 +77,7 @@ pull request it has seen in a local SQLite file (`CRIER_DB_PATH`).
 
 | Command | Description |
 |---------|-------------|
-| `crier draft <owner/repo>` | Print drafts for a repository's recent activity. Doesn't post or use Telegram. |
+| `crier draft <owner/repo>` | Print drafts about a repository's latest commits, or about its newest release or merged pull request if every recent commit is filtered out. Doesn't score the activity, post, or use Telegram. |
 | `crier run` | Start the Telegram bot and the polling loop. Runs until you stop it. |
 | `crier status` | Show the configuration and the number of pending drafts. |
 | `crier drafts` | List recent drafts. Filter with `--status`, `--platform`, and `--days`. |
@@ -86,7 +88,8 @@ In Telegram, the bot answers only the user set in `CRIER_TELEGRAM_OWNER_ID`:
 - `/start` shows help.
 - `/status` shows the watched repositories and the number of pending drafts.
 - `/history` lists posts from the last 30 days.
-- `/draft <owner/repo>` asks for drafts for a repository now.
+- `/draft <owner/repo>` drafts the repository's activity that the bot hasn't
+  seen yet, without scoring it.
 
 To change a draft, press **Edit** and send the new text. Start it with a
 platform name, such as `twitter: New text`, to change one platform's draft;
@@ -112,7 +115,9 @@ directory where you run Crier. [.env.example](.env.example) lists them all.
 | `CRIER_TWITTER_CONSUMER_KEY`, `CRIER_TWITTER_CONSUMER_SECRET`, `CRIER_TWITTER_ACCESS_TOKEN`, `CRIER_TWITTER_ACCESS_TOKEN_SECRET` | X (Twitter) API credentials. All four are required. | The same names without `CRIER_` |
 | `CRIER_LINKEDIN_ACCESS_TOKEN` | LinkedIn access token | `$LINKEDIN_ACCESS_TOKEN` |
 
-When you approve a draft, Crier skips any platform that has no credentials.
+Crier reads the unprefixed fallbacks, such as `ANTHROPIC_API_KEY` and
+`GH_TOKEN`, only from the environment, not from `.env`. When you approve a
+draft, Crier skips any platform that has no credentials.
 
 ## Development
 
@@ -124,8 +129,8 @@ pytest
 ```
 
 Crier installs openadapt-herald from GitHub at the commit pinned in
-`pyproject.toml`. To work on both at once, also run
-`pip install -e ../openadapt-herald` from a herald checkout next to this one.
+`pyproject.toml`. To work on both at once, clone openadapt-herald next to this
+repository and run `pip install -e ../openadapt-herald`.
 
 ## Limits
 
@@ -136,6 +141,11 @@ Crier installs openadapt-herald from GitHub at the commit pinned in
 - Crier polls GitHub instead of using webhooks, so drafts arrive up to one poll
   interval after the activity.
 - Approval happens only in Telegram, and only one person can approve.
+- Platform toggles are kept in memory. After a restart, pressing **Approve** on
+  a draft sent before the restart posts nothing and adds "No platforms
+  selected." to the message. Turn the platforms back on with their buttons, then
+  approve.
+- `/draft` sends a draft even when the repository has nothing new. Reject it.
 
 Repository status, what data goes to which service, and how approval is
 enforced are described in [docs/COMPLIANCE.md](docs/COMPLIANCE.md).
