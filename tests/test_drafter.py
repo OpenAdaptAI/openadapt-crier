@@ -85,13 +85,13 @@ class TestScoreInterestingness:
         score = score_interestingness(
             [{"sha": "a", "author": "b", "message": "c"}], "org/repo", "sk-test"
         )
-        assert score == 5.0  # default fallback
+        assert score is None  # no score, not a passing default
 
     def test_score_no_api_key(self):
         score = score_interestingness(
             [{"sha": "a", "author": "b", "message": "c"}], "org/repo", ""
         )
-        assert score == 5.0
+        assert score is None
 
     @patch("crier.drafter.anthropic.Anthropic")
     def test_score_handles_exception(self, mock_anthropic_cls):
@@ -100,7 +100,16 @@ class TestScoreInterestingness:
         score = score_interestingness(
             [{"sha": "a", "author": "b", "message": "c"}], "org/repo", "sk-test"
         )
-        assert score == 5.0
+        assert score is None
+
+    @patch("crier.drafter.anthropic.Anthropic")
+    def test_score_failure_is_not_passing(self, mock_anthropic_cls):
+        """A scoring failure must never come back as a score that clears the gate."""
+        mock_anthropic_cls.side_effect = RuntimeError("API down")
+        commits = [{"sha": "a", "author": "b", "message": "c"}]
+
+        assert score_interestingness(commits, "org/repo", api_key="sk-test") is None
+        assert score_interestingness(commits, "org/repo", api_key="") is None
 
 
 class TestGenerateDrafts:

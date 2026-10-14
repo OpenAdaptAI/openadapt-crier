@@ -350,10 +350,13 @@ class CrierBot:
         )
 
         # Build result summary
+        dry_run = self._settings.dry_run
         result_lines = []
         for platform, result in results.items():
             label = _PLATFORM_LABELS.get(platform, platform)
-            if result["success"] == "true":
+            if dry_run:
+                result_lines.append(f"  {label}: Not posted (dry run)")
+            elif result["success"] == "true":
                 url = result.get("url", "")
                 if url and url != "[DRY RUN]":
                     result_lines.append(f"  {label}: Posted - {url}")
@@ -365,7 +368,8 @@ class CrierBot:
         status_text = "\n".join(result_lines) if result_lines else "  No results"
 
         # Edit the original message to show results
-        new_text = query.message.text + f"\n\n<b>POSTED</b>\n{_escape_html(status_text)}"
+        heading = "DRY RUN" if dry_run else "POSTED"
+        new_text = query.message.text + f"\n\n<b>{heading}</b>\n{_escape_html(status_text)}"
         await query.edit_message_text(text=new_text, parse_mode="HTML")
 
         # Clean up toggles

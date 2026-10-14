@@ -61,13 +61,96 @@ def run(
     asyncio.run(_run_bot_and_watcher(settings))
 
 
+async def _poll_and_draft(settings, watcher, bot) -> None:
+    """Single poll cycle: check for events, score, draft, and send for approval."""
+    from crier.db import create_draft, create_event
+    from crier.drafter import generate_drafts, score_interestingness
+
+    try:
+        events = await watcher.poll_repos(settings.repo_list)
+        if not events:
+            return
+
+        for event in events:
+            # Score interestingness for push events
+            if event.event_type == "push":
+                commits = event.payload.get("commits", [])
+                score = score_interestingness(
+                    commits, event.repo, settings.anthropic_api_key
+                )
+                if score is None:
+                    # Fail closed: an unscored event never counts as interesting.
+                    logging.getLogger("crier").warning(
+                        "Skipping %s event on %s: could not score the commits, "
+                        "so no drafts were made",
+                        event.event_type,
+                        event.repo,
+                    )
+                    continue
+                if score < settings.interest_threshold:
+                    logging.getLogger("crier").info(
+                        "Skipping %s event on %s (score %.1f < threshold %.1f)",
+                        event.event_type,
+                        event.repo,
+                        score,
+                        settings.interest_threshold,
+                    )
+                    continue
+            else:
+                # Releases and PR merges always pass
+                score = 10.0
+
+            # Store the event
+            event_id = await create_event(
+                settings.db_path,
+                repo=event.repo,
+                event_type=event.event_type,
+                ref=event.ref,
+                payload=json.dumps(event.payload),
+            )
+
+            # Generate drafts
+            drafts = generate_drafts(
+                event, api_key=settings.anthropic_api_key
+            )
+
+            # Store drafts in DB
+            for platform, content in drafts.items():
+                if platform == "summary":
+                    continue
+                await create_draft(
+                    settings.db_path,
+                    event_id=event_id,
+                    platform=platform,
+                    content=content,
+                    interestingness_score=score,
+                )
+
+            # Send to Telegram for approval
+            event_info = {
+                "repo": event.repo,
+                "event_type": event.event_type,
+                "ref": event.ref,
+                **event.payload,
+            }
+            await bot.send_draft_for_approval(
+                chat_id=settings.telegram_owner_id,
+                event_id=event_id,
+                drafts={k: v for k, v in drafts.items() if k != "summary"},
+                event_info=event_info,
+            )
+
+    except Exception:
+        logging.getLogger("crier").exception("Error in poll cycle")
+
+
 async def _run_bot_and_watcher(settings) -> None:
     """Run the Telegram bot and GitHub watcher concurrently."""
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
     from crier.bot import CrierBot
     from crier.db import init_db
-    from crier.drafter import generate_drafts, score_interestingness
+    from crier.drafter import generate_drafts
     from crier.watcher import GitHubWatcher
 
     # Initialize database
@@ -79,78 +162,6 @@ async def _run_bot_and_watcher(settings) -> None:
 
     # Set up the GitHub watcher
     watcher = GitHubWatcher(settings.github_token, settings.db_path)
-
-    async def poll_and_draft() -> None:
-        """Single poll cycle: check for events, score, draft, and send for approval."""
-        from crier.db import create_draft, create_event
-
-        try:
-            events = await watcher.poll_repos(settings.repo_list)
-            if not events:
-                return
-
-            for event in events:
-                # Score interestingness for push events
-                if event.event_type == "push":
-                    commits = event.payload.get("commits", [])
-                    score = score_interestingness(
-                        commits, event.repo, settings.anthropic_api_key
-                    )
-                    if score < settings.interest_threshold:
-                        logging.getLogger("crier").info(
-                            "Skipping %s event on %s (score %.1f < threshold %.1f)",
-                            event.event_type,
-                            event.repo,
-                            score,
-                            settings.interest_threshold,
-                        )
-                        continue
-                else:
-                    # Releases and PR merges always pass
-                    score = 10.0
-
-                # Store the event
-                event_id = await create_event(
-                    settings.db_path,
-                    repo=event.repo,
-                    event_type=event.event_type,
-                    ref=event.ref,
-                    payload=json.dumps(event.payload),
-                )
-
-                # Generate drafts
-                drafts = generate_drafts(
-                    event, api_key=settings.anthropic_api_key
-                )
-
-                # Store drafts in DB
-                for platform, content in drafts.items():
-                    if platform == "summary":
-                        continue
-                    await create_draft(
-                        settings.db_path,
-                        event_id=event_id,
-                        platform=platform,
-                        content=content,
-                        interestingness_score=score,
-                    )
-
-                # Send to Telegram for approval
-                event_info = {
-                    "repo": event.repo,
-                    "event_type": event.event_type,
-                    "ref": event.ref,
-                    **event.payload,
-                }
-                await bot.send_draft_for_approval(
-                    chat_id=settings.telegram_owner_id,
-                    event_id=event_id,
-                    drafts={k: v for k, v in drafts.items() if k != "summary"},
-                    event_info=event_info,
-                )
-
-        except Exception:
-            logging.getLogger("crier").exception("Error in poll cycle")
 
     # Handle manual draft requests from /draft command
     async def check_manual_requests() -> None:
@@ -247,7 +258,12 @@ async def _run_bot_and_watcher(settings) -> None:
 
     # Set up the scheduler for polling
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(poll_and_draft, "interval", seconds=settings.poll_interval)
+    scheduler.add_job(
+        _poll_and_draft,
+        "interval",
+        seconds=settings.poll_interval,
+        args=(settings, watcher, bot),
+    )
     scheduler.add_job(check_manual_requests, "interval", seconds=5)
     scheduler.start()
 

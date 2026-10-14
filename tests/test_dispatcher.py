@@ -7,7 +7,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from crier.config import CrierSettings
-from crier.db import create_draft, create_event, get_draft_by_id, init_db
+from crier.db import (
+    create_draft,
+    create_event,
+    get_draft_by_id,
+    get_recent_drafts,
+    init_db,
+    update_draft_status,
+)
 from crier.dispatcher import _build_herald_settings, post_approved_draft, post_single_draft
 
 
@@ -202,6 +209,84 @@ class TestPostApprovedDraft:
         draft = await get_draft_by_id(db_path, draft_id)
         assert draft["status"] == "pending"
         assert draft["error"] == "Rate limited"
+
+
+class TestDryRunDoesNotMarkPosted:
+    @pytest.mark.asyncio
+    async def test_dry_run_does_not_mark_posted(self, settings, db_path):
+        """A dry run must leave drafts unposted so they stay out of posting history."""
+        settings.dry_run = True
+
+        event_id = await create_event(
+            db_path, repo="org/repo", event_type="push", ref="abc"
+        )
+        discord_id = await create_draft(
+            db_path, event_id=event_id, platform="discord", content="Discord post"
+        )
+        twitter_id = await create_draft(
+            db_path, event_id=event_id, platform="twitter", content="Tweet"
+        )
+        # The Telegram approve flow marks drafts approved before dispatching.
+        await update_draft_status(db_path, twitter_id, status="approved")
+
+        results = await post_approved_draft(
+            settings, event_id, platforms={"discord", "twitter"}
+        )
+        assert set(results) == {"discord", "twitter"}
+
+        for draft_id, expected_status in ((discord_id, "pending"), (twitter_id, "approved")):
+            draft = await get_draft_by_id(db_path, draft_id)
+            assert draft["status"] == expected_status
+            assert draft["posted_at"] is None
+            assert draft["post_url"] is None
+
+        assert await get_recent_drafts(db_path, status="posted") == []
+
+    @pytest.mark.asyncio
+    async def test_single_draft_dry_run_does_not_mark_posted(self, settings, db_path):
+        settings.dry_run = True
+
+        event_id = await create_event(
+            db_path, repo="org/repo", event_type="push", ref="abc"
+        )
+        draft_id = await create_draft(
+            db_path, event_id=event_id, platform="discord", content="Test"
+        )
+
+        result = await post_single_draft(settings, draft_id)
+        assert result["success"] == "true"
+
+        draft = await get_draft_by_id(db_path, draft_id)
+        assert draft["status"] == "pending"
+        assert draft["posted_at"] is None
+        assert draft["post_url"] is None
+        assert await get_recent_drafts(db_path, status="posted") == []
+
+    @pytest.mark.asyncio
+    @patch("crier.dispatcher.publish_content")
+    @patch("crier.dispatcher.get_publishers")
+    async def test_single_draft_dry_run_skips_publisher_check(
+        self, mock_get_publishers, mock_publish, settings, db_path
+    ):
+        """A dry run previews the post even when that platform has no credentials."""
+        settings.dry_run = True
+        mock_get_publishers.return_value = []
+
+        event_id = await create_event(
+            db_path, repo="org/repo", event_type="push", ref="abc"
+        )
+        draft_id = await create_draft(
+            db_path, event_id=event_id, platform="linkedin", content="Post"
+        )
+
+        result = await post_single_draft(settings, draft_id)
+        assert result["success"] == "true"
+        assert "DRY RUN" in result["message"]
+        mock_publish.assert_not_called()
+
+        draft = await get_draft_by_id(db_path, draft_id)
+        assert draft["status"] == "pending"
+        assert draft["error"] is None
 
 
 class TestPostSingleDraft:
