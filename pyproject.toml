@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "crier"
 version = "0.1.0"
-description = "Event-driven social media approval bot with Telegram"
+description = "Draft posts about GitHub activity with Claude, approve them in Telegram, then post to Discord, X, and LinkedIn"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -24,7 +24,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "herald-announce",
+    # herald-announce is not on PyPI, so it installs from GitHub at a fixed commit.
+    "herald-announce @ git+https://github.com/OpenAdaptAI/openadapt-herald@7d69b4405e7088f43b86b2722c222a2d79e463ef",
+    "anthropic>=0.30",
     "python-telegram-bot>=22",
     "aiosqlite>=0.20",
     "apscheduler>=3.10",
@@ -42,8 +44,8 @@ dev = [
     "ruff>=0.1.0",
 ]
 
-[tool.uv.sources]
-herald-announce = { path = "../openadapt-herald", editable = true }
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["crier"]
